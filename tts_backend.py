@@ -309,7 +309,8 @@ def say_tts(text, voice=None):
     subprocess.run(
         ["say", "-v", voice or default_voice(), "-o", out,
          "--file-format=WAVE", "--data-format=LEI16@22050", text],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=float(env("LOCAL_TTS_TIMEOUT", "30")))
     return out
 
 

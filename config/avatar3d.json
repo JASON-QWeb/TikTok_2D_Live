@@ -1,0 +1,22 @@
+{
+  "name": "数字人",
+  "url": "",
+  "rotationY": 0,
+  "maxPixelRatio": 1.5,
+  "maxFps": 60,
+  "morphs": {
+    "aa": ["jawOpen", "mouthOpen", "viseme_aa"],
+    "blink": ["eyeBlinkLeft", "eyeBlinkRight", "blink"],
+    "happy": ["mouthSmileLeft", "mouthSmileRight", "happy"],
+    "sad": ["mouthFrownLeft", "mouthFrownRight", "sad"],
+    "angry": ["browDownLeft", "browDownRight", "angry"],
+    "surprised": ["browInnerUp", "eyeWideLeft", "eyeWideRight"]
+  },
+  "bones": {
+    "head": "Head",
+    "neck": "Neck",
+    "spine": "Spine",
+    "leftUpperArm": "LeftArm",
+    "rightUpperArm": "RightArm"
+  }
+}

@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import time
+import threading
 
 import requests
 
@@ -156,11 +157,21 @@ def _accumulate_usage(u):
 _load_usage()
 
 
+_HTTP_LOCAL = threading.local()
+
+
+def _http_session():
+    # 每个生成线程复用 TLS 连接；不在线程间共享可变 Session。
+    if not hasattr(_HTTP_LOCAL, "session"):
+        _HTTP_LOCAL.session = requests.Session()
+    return _HTTP_LOCAL.session
+
+
 def deepseek_reply(danmaku: str, nick: str = "", history=None, user_context: str = "") -> str:
     url, headers, body = _deepseek_request(danmaku, nick, history, user_context, stream=False)
-    resp = requests.post(url, headers=headers, json=body, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
+    with _http_session().post(url, headers=headers, json=body, timeout=(10, 60)) as resp:
+        resp.raise_for_status()
+        data = resp.json()
     _accumulate_usage(data.get("usage"))
     return data["choices"][0]["message"]["content"].strip()
 
@@ -172,9 +183,9 @@ def deepseek_stream(danmaku: str, nick: str = "", history=None, user_context: st
     """
     url, headers, body = _deepseek_request(danmaku, nick, history, user_context, stream=True)
     # (连接超时, 两次数据之间的读超时)
-    with requests.post(url, headers=headers, json=body, stream=True, timeout=(10, 60)) as resp:
+    with _http_session().post(url, headers=headers, json=body, stream=True, timeout=(10, 30)) as resp:
         resp.raise_for_status()
-        for raw in resp.iter_lines(decode_unicode=False):
+        for raw in resp.iter_lines(chunk_size=1, decode_unicode=False):
             if not raw:
                 continue
             line = raw.decode("utf-8", errors="replace").strip()

@@ -1,0 +1,51 @@
+{
+  "mode": "sse",
+  "samples": [
+    {
+      "seconds": 0.5541,
+      "audio_bytes": 152516,
+      "timings": {
+        "waited": 0.0,
+        "tts": 0.547,
+        "first_audio": 0.547
+      }
+    },
+    {
+      "seconds": 0.9235,
+      "audio_bytes": 154564,
+      "timings": {
+        "waited": 0.3,
+        "tts": 0.611,
+        "first_audio": 0.611
+      }
+    },
+    {
+      "seconds": 0.8922,
+      "audio_bytes": 157124,
+      "timings": {
+        "waited": 0.3,
+        "tts": 0.582,
+        "first_audio": 0.582
+      }
+    },
+    {
+      "seconds": 0.9219,
+      "audio_bytes": 155588,
+      "timings": {
+        "waited": 0.3,
+        "tts": 0.61,
+        "first_audio": 0.61
+      }
+    },
+    {
+      "seconds": 0.9145,
+      "audio_bytes": 154564,
+      "timings": {
+        "waited": 0.3,
+        "tts": 0.604,
+        "first_audio": 0.604
+      }
+    }
+  ],
+  "median_seconds": 0.9145
+}

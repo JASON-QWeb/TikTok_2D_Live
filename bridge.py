@@ -1,24 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-最小可运行的本地「数字人桥」服务（仅用标准库，conda `usually` 环境零新依赖）。
+"""数字人桥：弹幕 → 流式 LLM → 本地 TTS → 3D / Live2D。
 
-功能：
-  POST /api/danmaku   收弹幕/礼物 -> 入队 -> 后台走链路(DeepSeek -> TTS -> Vidu 对口型)
-                      礼物额外先走 GiftDirector，立即产出 Live2D 动作/特效
-  GET  /api/state     查最新一条处理结果（含各阶段耗时、礼物动作）
-  GET  /video         播放最新渲染视频文件
-  GET  /              预览页（自动轮询并播放最新视频）
-
-启动：
-  conda activate usually
-  cp .env.example .env    # 填 DEEPSEEK_API_KEY / VIDU_API_KEY / VIDU_TTS_VOICE_ID / VIDU_AVATAR_VIDEO_URL
-  python bridge.py
-
-依赖：verify_pipeline.py 同目录；requests + python-dotenv（usually 环境已装）。
+运行：npm ci && npm run build；python bridge.py
+POST /api/danmaku 收弹幕，GET /api/events 推送状态，GET /avatar2d 保留 2D。
 """
 
-import hmac
 import json
 import os
 import re
@@ -29,8 +16,8 @@ import time
 import traceback
 import socketserver
 from collections import deque
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from http.server import ThreadingHTTPServer
+from contextlib import closing
 
 # 跨平台 TTS：piper / macOS say / Windows sapi，按 TTS_BACKEND 或平台自动选择
 from tts_backend import (
@@ -56,10 +43,14 @@ from verify_pipeline import (
     vidu_tts,
 )
 from director import GiftDirector
+from bridge_events import StateEvents
+
+EVENTS = StateEvents()
+WORK_READY = threading.Event()
 
 HOST = env("BRIDGE_HOST", "127.0.0.1")
 PORT = int(env("BRIDGE_PORT", "8000") or 8000)
-MIN_INTERVAL = float(env("BRIDGE_MIN_INTERVAL", "3") or 3)   # 两条回复最小间隔(秒)，在 worker 里控制
+MIN_INTERVAL = float(env("BRIDGE_MIN_INTERVAL", "0.3") or 0.3)   # 两条回复最小间隔(秒)，在 worker 里控制
 MAX_QUEUE = int(env("BRIDGE_MAX_QUEUE", "20") or 20)
 MAX_BODY = int(env("BRIDGE_MAX_BODY", "8192") or 8192)       # 请求体上限(字节)
 
@@ -248,6 +239,7 @@ def publish_action(plan):
         action = dict(plan)
         action["seq"] = ACTION_SEQ
         ACTION_LOG.append(action)
+    EVENTS.publish()
     return action
 
 
@@ -337,11 +329,14 @@ def _push_reply(entry, wav_path):
     with LOCK:
         REPLY_SEQ += 1
         entry["seq"] = REPLY_SEQ
+        entry["has_audio"] = bool(wav_path)
+        entry["created_at"] = time.time()
         REPLIES.append(entry)
         if wav_path:
             REPLY_AUDIO[REPLY_SEQ] = wav_path
             LATEST_AUDIO = wav_path
         _cleanup_audio()
+    EVENTS.publish()
     return entry
 
 
@@ -355,7 +350,8 @@ def finish_reply(reply, voice_label, user, content, timings, say_voice=None, emo
     text = strip_emoji(reply)
     t0 = time.time()
     wav_path = local_tts(text, say_voice) if text else ""
-    timings["tts"] = round(time.time() - t0, 2)
+    timings["tts"] = round(time.time() - t0, 3)
+    timings["first_audio"] = round(timings.get("deepseek", 0) + timings["tts"], 3)
     with LOCK:
         LATEST.update(status="done", reply=reply, voice=voice_label,
                       audio_url="", task_id="", video_url="",
@@ -370,106 +366,10 @@ def finish_reply(reply, voice_label, user, content, timings, say_voice=None, emo
 # LLM 按 prompt 在回复开头输出「[开心]」之类的标签（见 verify_pipeline.EMOTION_INSTRUCTION）。
 # 这里把标签剥掉（不念、不显示），换成英文代号随回复下发，前端据此切换 Live2D 表情。
 
-EMOTION_MAP = {"开心": "happy", "害羞": "shy", "惊讶": "surprised", "难过": "sad",
-               "生气": "angry", "思考": "thinking", "平静": "neutral"}
-EMOTION_LABEL = {v: k for k, v in EMOTION_MAP.items()}
-_TAG_ALT = "|".join(EMOTION_MAP)
-_LEAD_TAG_RE = re.compile(r"^\s*[\[【](" + _TAG_ALT + r")[\]】]\s*")
-_ANY_TAG_RE = re.compile(r"[\[【](?:" + _TAG_ALT + r")[\]】]")
-
-
-def parse_emotion(text):
-    """整段文本：返回 (情绪代号或空串, 去掉标签后的文本)。"""
-    m = _LEAD_TAG_RE.match(text or "")
-    emotion = EMOTION_MAP[m.group(1)] if m else ""
-    rest = text[m.end():] if m else (text or "")
-    return emotion, _ANY_TAG_RE.sub("", rest).strip()
-
-
-def strip_emotion_stream(deltas, out):
-    """流式文本：识别开头的情绪标签写入 out["emotion"]，其余增量原样往下传。
-
-    只在开头几个字符内等待标签；不是合法标签就原样放行，不会吞字。
-    """
-    buf = ""
-    decided = False
-    for d in deltas:
-        if decided:
-            yield d
-            continue
-        buf += d
-        head = buf.lstrip()
-        if not head:
-            continue
-        if head[0] not in "[【":
-            decided = True
-            yield buf
-            continue
-        m = _LEAD_TAG_RE.match(buf)
-        if m:
-            out["emotion"] = EMOTION_MAP[m.group(1)]
-            decided = True
-            if buf[m.end():]:
-                yield buf[m.end():]
-        elif len(head) > 6 or "]" in head or "】" in head:
-            decided = True        # 方括号开头但不是情绪标签：照常输出
-            yield buf
-    if not decided and buf:
-        emotion, rest = parse_emotion(buf)
-        if emotion:
-            out["emotion"] = emotion
-        if rest:
-            yield rest
-
-
-# ---------------------------------------------------------------- 流式按句合成
-
-_STRONG_PUNCT = set("。！？!?；;…~～\n")
-_WEAK_PUNCT = set("，,、：:")
-_CLOSERS = set("」』”’）)】》 ")
-
-
-def _find_cut(buf, first):
-    """在 buf 里找切句位置；返回切点下标（不含），找不到返回 None。
-
-    只有标点后面已经出现了下一个正文字符才切——否则「哈哈！」之后紧跟的「！」
-    会被单独切成一段，念出来很怪。
-    """
-    n = len(buf)
-    i = 0
-    while i < n:
-        ch = buf[i]
-        strong = ch in _STRONG_PUNCT
-        # 第一句允许在逗号处提前切：尽快开口比断句完美更重要
-        weak_ok = ch in _WEAK_PUNCT and (first and i + 1 >= 8 or i + 1 >= 40)
-        if (strong and i + 1 >= 4) or weak_ok:
-            j = i + 1
-            while j < n and (buf[j] in _STRONG_PUNCT or buf[j] in _WEAK_PUNCT
-                             or buf[j] in _CLOSERS):
-                j += 1
-            if j < n:
-                return j
-            return None
-        i += 1
-    return None
-
-
-def iter_sentences(deltas):
-    """把流式文本增量切成适合 TTS 的句子（生成器）。"""
-    buf = ""
-    first = True
-    for delta in deltas:
-        buf += delta
-        while True:
-            cut = _find_cut(buf, first)
-            if cut is None:
-                break
-            seg, buf = buf[:cut], buf[cut:]
-            if seg.strip():
-                yield seg.strip()
-                first = False
-    if buf.strip():
-        yield buf.strip()
+from speech_stream import (
+    EMOTION_MAP, EMOTION_LABEL, _ANY_TAG_RE, _STRONG_PUNCT, _WEAK_PUNCT,
+    parse_emotion, strip_emotion_stream, iter_sentences, prefetch, measure_stream,
+)
 
 
 def stream_reply(content, user, voice_label, say_voice, timings):
@@ -485,28 +385,29 @@ def stream_reply(content, user, voice_label, say_voice, timings):
     deltas = strip_emotion_stream(
         deepseek_stream(content, nick=user, history=list(HISTORY),
                         user_context=user_context(user)), meta)
-    for seg in iter_sentences(deltas):
-        seg = filter_reply(_ANY_TAG_RE.sub("", carry + seg))
-        carry = ""
-        speak_text = strip_emoji(seg).strip()
-        if not speak_text or all(c in _STRONG_PUNCT or c in _WEAK_PUNCT for c in speak_text):
-            carry = seg
-            continue
-        if part == 0:
-            timings["deepseek_first"] = round(time.time() - t0, 2)
-        full += seg
-        t1 = time.time()
-        wav_path = local_tts(speak_text, say_voice)
-        tts_total += time.time() - t1
-        if part == 0:
-            timings["first_audio"] = round(time.time() - t0, 2)
-        last_entry = _push_reply({"reply_id": reply_id, "part": part, "final": False,
-                                  "user": user, "content": content, "reply": full,
-                                  "say": speak_text, "voice": voice_label,
-                                  "emotion": meta.get("emotion", "")}, wav_path)
-        with LOCK:
-            LATEST.update(reply=full, voice=voice_label, local_path=wav_path)
-        part += 1
+    with closing(prefetch(iter_sentences(measure_stream(deltas, timings)))) as segments:
+        for seg in segments:
+            seg = filter_reply(_ANY_TAG_RE.sub("", carry + seg))
+            carry = ""
+            speak_text = strip_emoji(seg).strip()
+            if not speak_text or all(c in _STRONG_PUNCT or c in _WEAK_PUNCT for c in speak_text):
+                carry = seg
+                continue
+            if part == 0:
+                timings["deepseek_first"] = round(time.time() - t0, 2)
+            full += seg
+            t1 = time.time()
+            wav_path = local_tts(speak_text, say_voice)
+            tts_total += time.time() - t1
+            if part == 0:
+                timings["first_audio"] = round(time.time() - t0, 2)
+            last_entry = _push_reply({"reply_id": reply_id, "part": part, "final": False,
+                                      "user": user, "content": content, "reply": full,
+                                      "say": speak_text, "voice": voice_label,
+                                      "emotion": meta.get("emotion", "")}, wav_path)
+            with LOCK:
+                LATEST.update(reply=full, voice=voice_label, local_path=wav_path)
+            part += 1
     if carry:
         full += carry
     with LOCK:
@@ -514,7 +415,7 @@ def stream_reply(content, user, voice_label, say_voice, timings):
             # 前端每次轮询拿到的是 REPLIES 的新快照，改这里即可通知「这句话说完了」
             last_entry["final"] = True
             last_entry["reply"] = full
-    timings["deepseek"] = round(time.time() - t0, 2)
+    timings["pipeline"] = round(time.time() - t0, 2)
     timings["tts"] = round(tts_total, 2)
     if part == 0:   # 一句可念的都没有（空回复或只有 emoji）
         raise RuntimeError("DeepSeek 返回了空回复")
@@ -522,87 +423,50 @@ def stream_reply(content, user, voice_label, say_voice, timings):
         LATEST.update(status="done", reply=full, voice=voice_label,
                       audio_url="", task_id="", video_url="", timings=timings,
                       error="", updated_at=time.strftime("%H:%M:%S"))
+    EVENTS.publish()
     return full, meta.get("emotion", "")
 
 
-def try_music_command(content):
-    """识别「点歌/来一首/放一首/播放」命令，返回歌名关键词或 None。"""
-    import re
-    m = re.search(r"^(?:点歌|来一首|放一首|放首歌|播放)\s*[:：]?\s*(.+)$", content)
-    if m:
-        kw = m.group(1).strip()
-        if kw and len(kw) <= 40:
-            return kw
-    return None
+from bridge_music import try_music_command, netease_search
 
 
-_NETEASE_LOGGED = False
+def process_cloud_reply(content, user, timings):
+    t0 = time.time()
+    emotion, reply = parse_emotion(
+        deepseek_reply(content, nick=user, history=list(HISTORY),
+                       user_context=user_context(user)))
+    timings["deepseek"] = round(time.time() - t0, 2)
+    _remember(user, content, reply, emotion)
 
+    voice_id, voice_label = pick_voice(content)
+    t0 = time.time()
+    audio_url = vidu_tts(reply, voice_id)
+    timings["tts"] = round(time.time() - t0, 2)
 
-def netease_login():
-    """用 MUSIC_U cookie 登录网易云（VIP 解锁完整版/高音质）。幂等。"""
-    global _NETEASE_LOGGED
-    if _NETEASE_LOGGED:
-        return
-    mu = env("NETEASE_MUSIC_U", "").strip()
-    if not mu:
-        return
-    try:
-        from pyncm import apis
-        apis.login.LoginViaCookie(MUSIC_U=mu)
-        _NETEASE_LOGGED = True
-    except Exception:
-        pass
+    avatar_video = env("VIDU_AVATAR_VIDEO_URL")
+    if not avatar_video:
+        raise RuntimeError("缺少 VIDU_AVATAR_VIDEO_URL")
 
+    t0 = time.time()
+    task_id = vidu_lipsync_submit(avatar_video, audio_url)
+    timings["submit"] = round(time.time() - t0, 2)
 
-def parse_lrc(lrc_text):
-    """解析 LRC 文本为 [{t:秒, text:文本}]，跳过元信息行(作词/作曲等)。"""
-    import re
-    META = re.compile(r"^(作词|作曲|编曲|制作人|录音|混音|母带|监制|和声|吉他|贝斯|鼓|键盘|钢琴|弦乐|小提琴|大提琴|箫|二胡|演唱|出品|发行|OP|SP|版权|企划|统筹|配唱|人声|音乐总监|艺人)\s*[:：]")
-    lines = []
-    for line in (lrc_text or "").splitlines():
-        for m in re.finditer(r"\[(\d+):(\d+(?:\.\d+)?)\]([^\[]*)", line):
-            mm = int(m.group(1))
-            ss = float(m.group(2))
-            txt = m.group(3).strip()
-            if txt and not META.match(txt) and ":" not in txt and "：" not in txt:
-                lines.append({"t": mm * 60 + ss, "text": txt})
-    lines.sort(key=lambda x: x["t"])
-    return lines
+    t0 = time.time()
+    video_url = vidu_lipsync_wait(task_id)
+    timings["render_wait"] = round(time.time() - t0, 2)
 
+    t0 = time.time()
+    local_path = download(video_url, os.path.join(BASE_DIR, "output"))
+    timings["download"] = round(time.time() - t0, 2)
 
-def netease_search(query):
-    """搜网易云歌曲，返回 {'id','name','artist','url','pic','lyric'} 或 None。"""
-    netease_login()
-    try:
-        from pyncm import apis
-        r = apis.cloudsearch.GetSearchResult(query, limit=5)
-        songs = (r.get("result") or {}).get("songs") or []
-        for s in songs:
-            sid = s.get("id")
-            name = s.get("name")
-            artist = "/".join(a.get("name", "") for a in (s.get("ar") or []) if a.get("name"))
-            al = s.get("al") or {}
-            pic = (al.get("picUrl") or "").replace("http://", "https://")
-            url = None
-            try:
-                u = apis.track.GetTrackAudio([sid], bitrate=320000, encodeType="aac")
-                url = ((u.get("data") or [{}])[0] or {}).get("url")
-            except Exception:
-                pass
-            lyric = []
-            if url:
-                try:
-                    lr = apis.track.GetTrackLyrics(str(sid))
-                    lrc_text = ((lr or {}).get("lrc") or {}).get("lyric") or ""
-                    lyric = parse_lrc(lrc_text)
-                except Exception:
-                    pass
-            if url:
-                return {"id": sid, "name": name, "artist": artist, "url": url, "pic": pic, "lyric": lyric}
-        return None
-    except Exception:
-        return None
+    with LOCK:
+        LATEST.update(status="done", reply=reply, voice=voice_label,
+                      audio_url=audio_url, task_id=task_id, video_url=video_url,
+                      local_path=local_path, timings=timings,
+                      error="", updated_at=time.strftime("%H:%M:%S"))
+    _push_reply({"reply_id": _new_reply_id(), "part": 0, "final": True,
+                 "user": user, "content": content, "reply": reply,
+                 "voice": voice_label, "emotion": emotion}, "")
 
 
 def process_one(item):
@@ -612,8 +476,9 @@ def process_one(item):
     content = item.get("content") or item.get("text") or ""
     with LOCK:
         LATEST.update(status="processing", user=user, content=content,
-                      reply="", voice="", video_url="", local_path="", error="",
+                      reply="", voice="", video_url="", local_path="", error="", timings={},
                       updated_at=time.strftime("%H:%M:%S"))
+    EVENTS.publish()
     timings = {"waited": round(time.time() - item.get("_ts", time.time()), 2)}
 
     try:
@@ -672,42 +537,7 @@ def process_one(item):
                              say_voice=say_voice, emotion=emotion)
             _remember(user, content, reply, emotion)
         else:
-            t0 = time.time()
-            emotion, reply = parse_emotion(
-                deepseek_reply(content, nick=user, history=list(HISTORY),
-                               user_context=user_context(user)))
-            timings["deepseek"] = round(time.time() - t0, 2)
-            _remember(user, content, reply, emotion)
-
-            voice_id, voice_label = pick_voice(content)
-            t0 = time.time()
-            audio_url = vidu_tts(reply, voice_id)
-            timings["tts"] = round(time.time() - t0, 2)
-
-            avatar_video = env("VIDU_AVATAR_VIDEO_URL")
-            if not avatar_video:
-                raise RuntimeError("缺少 VIDU_AVATAR_VIDEO_URL")
-
-            t0 = time.time()
-            task_id = vidu_lipsync_submit(avatar_video, audio_url)
-            timings["submit"] = round(time.time() - t0, 2)
-
-            t0 = time.time()
-            video_url = vidu_lipsync_wait(task_id)
-            timings["render_wait"] = round(time.time() - t0, 2)
-
-            t0 = time.time()
-            local_path = download(video_url, os.path.join(BASE_DIR, "output"))
-            timings["download"] = round(time.time() - t0, 2)
-
-            with LOCK:
-                LATEST.update(status="done", reply=reply, voice=voice_label,
-                              audio_url=audio_url, task_id=task_id, video_url=video_url,
-                              local_path=local_path, timings=timings,
-                              error="", updated_at=time.strftime("%H:%M:%S"))
-            _push_reply({"reply_id": _new_reply_id(), "part": 0, "final": True,
-                         "user": user, "content": content, "reply": reply,
-                         "voice": voice_label, "emotion": emotion}, "")
+            process_cloud_reply(content, user, timings)
     except BaseException as e:  # noqa: BLE001  require() 抛 SystemExit，也要接住，否则 worker 线程会死
         with LOCK:
             LATEST.update(status="error", error=str(e) or type(e).__name__, timings=timings,
@@ -715,6 +545,8 @@ def process_one(item):
         traceback.print_exc()
         if isinstance(e, KeyboardInterrupt):
             raise
+    finally:
+        EVENTS.publish()
 
 
 def _remember(user, content, reply, emotion=""):
@@ -812,6 +644,8 @@ def enqueue(item, now=None):
             LATEST.update(status="queued", user=item.get("user", ""),
                           content=item.get("content") or item.get("text") or "",
                           updated_at=time.strftime("%H:%M:%S"))
+    WORK_READY.set()
+    EVENTS.publish()
     return True
 
 
@@ -861,13 +695,14 @@ def worker():
     while True:
         # 节奏控制：两条回复之间至少隔 MIN_INTERVAL 秒（省 API 额度、给观众反应时间）。
         # 礼物不等。等待期间新来的高优先级弹幕会在出队时被优先挑中。
+        WORK_READY.clear()
         wait = _last_run + MIN_INTERVAL - time.time()
         if wait > 0 and not _gift_waiting():
-            time.sleep(min(wait, 0.2))
+            WORK_READY.wait(wait)
             continue
         item = pick_next()
         if item is None:
-            time.sleep(0.2)
+            WORK_READY.wait(1)
             continue
         process_one(item)
         _last_run = time.time()
@@ -889,353 +724,13 @@ LIVE2D_DIR = os.path.join(BASE_DIR, "live2d")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 
-PREVIEW_HTML = """<!doctype html>
-<html lang="zh"><head><meta charset="utf-8">
-<title>数字人预览</title>
-<style>
-  body{background:#111;color:#eee;font-family:-apple-system,sans-serif;margin:0}
-  video{width:100%;max-height:72vh;background:#000}
-  #box{max-width:960px;margin:0 auto;padding:16px}
-  #reply{font-size:22px;margin:12px 0;color:#9ef}
-  .muted{color:#888;font-size:13px}
-  #state{font-size:13px;color:#8a8}
-</style></head>
-<body><div id="box">
-  <video id="v" autoplay muted controls loop></video>
-  <div id="reply">等待弹幕…</div>
-  <div id="state" class="muted">status: idle</div>
-  <div class="muted">POST /api/danmaku 收弹幕 · GET /api/state 查状态</div>
-</div>
-<script>
-  let last = "";
-  async function poll(){
-    try{
-      const r = await fetch("/api/state");
-      const s = await r.json();
-      document.getElementById("state").textContent =
-        `status: ${s.status}  ${s.error ? "· 错误: "+s.error : ""}  ` +
-        (s.timings && s.timings.deepseek ? JSON.stringify(s.timings) : "");
-      if(s.status==="processing"){ document.getElementById("reply").textContent =
-        `弹幕: ${s.content}  → 生成中…`; }
-      else if(s.status==="done" && s.reply){
-        document.getElementById("reply").textContent =
-          `回复: ${s.reply}` + (s.voice ? `  [音色: ${s.voice}]` : "");
-      }
-      if(s.local_path && s.local_path !== last){
-        last = s.local_path;
-        const v = document.getElementById("v");
-        v.src = "/video?t=" + Date.now();
-        v.muted = false;
-        v.play().catch(()=>{});
-      }
-    }catch(e){}
-  }
-  setInterval(poll, 2000); poll();
-</script></body></html>"""
-
-
-class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="application/json"):
-        if isinstance(body, (dict, list)):
-            body = json.dumps(body, ensure_ascii=False)
-        data = body.encode("utf-8") if isinstance(body, str) else body
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        # 页面 URL 可能带 ?token=，必须阻止它随 Referer 泄漏到任何外部资源。
-        # 用响应头而不是 <meta name="referrer">：meta 只对其后发起的请求生效，
-        # 有人把远程资源挪到 meta 之前就会静默失效；响应头覆盖所有响应且改不掉。
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.end_headers()
-        self.wfile.write(data)
-
-    # ---------- 访问控制 ----------
-
-    def _host_ok(self):
-        """校验 Host 头（阻断 DNS rebinding）。"""
-        raw = (self.headers.get("Host") or "").strip()
-        if not raw:
-            return True                    # HTTP/1.0 客户端不带 Host，放行避免误伤
-        if raw.startswith("["):            # [::1] 或 [::1]:8000 —— 不能按冒号切
-            end = raw.find("]")
-            host = raw[1:end] if end > 0 else raw
-        else:
-            host = raw.rsplit(":", 1)[0]
-        return host.strip().lower() in ALLOWED_HOSTS or host.strip() in LOCAL_IPS
-
-    def _is_loopback_client(self):
-        """请求是否来自本机（本机转发器与浏览器无需携带令牌）。"""
-        ip = (self.client_address[0] if self.client_address else "") or ""
-        return (ip.startswith("127.") or ip in ("::1", "0:0:0:0:0:0:0:1")
-                or ip == "::ffff:127.0.0.1")
-
-    def _token_ok(self, allow_query=False):
-        """只读视图令牌校验。
-
-        回环客户端免校验（本机转发器与 OBS 浏览器源照常工作）；非回环客户端
-        必须带对令牌。只有页面入口（GET /）允许用 ?token= 传令牌——那是用户
-        手输的入口，浏览器无法在地址栏带自定义头。
-        """
-        if not BRIDGE_TOKEN:
-            return True          # 仅在回环绑定或显式 ALLOW_UNAUTHENTICATED 下出现
-        if self._is_loopback_client():
-            return True
-        got = self.headers.get("X-Bridge-Token") or ""
-        if not got and allow_query:
-            try:
-                got = (parse_qs(urlsplit(self.path).query).get("token") or [""])[0]
-            except ValueError:
-                got = ""
-        if not got:
-            return False
-        return hmac.compare_digest(got.encode("utf-8"), TOKEN_B)
-
-    def _origin_ok(self):
-        """校验 Origin（阻断跨站 POST）。非浏览器客户端不带 Origin，放行。"""
-        origin = (self.headers.get("Origin") or "").strip()
-        if not origin:
-            return True
-        try:
-            parts = urlsplit(origin)
-        except ValueError:
-            return False
-        host = (parts.hostname or "").lower()
-        if host not in ALLOWED_HOSTS and host not in LOCAL_IPS:
-            return False
-        # 端口也要比：否则任意本地端口的页面都能对本服务发起跨站请求
-        try:
-            port = parts.port
-        except ValueError:
-            return False
-        if port is None:
-            return PORT in (80, 443)
-        return port == PORT
-
-    def _deny(self):
-        return self._send(403, {"error": "forbidden: host/origin not allowed"})
-
-    def do_GET(self):
-        if not self._host_ok():
-            return self._deny()
-        # 先剥掉 query 再匹配路径：否则带 ?token= 的入口会被后面所有分支漏掉
-        path = self.path.split("?", 1)[0]
-        if path in ("/", "/avatar"):
-            if not self._token_ok(allow_query=True):
-                return self._send(401, {"error": "bad token"})
-            return self._send(200, AVATAR_HTML, "text/html; charset=utf-8")
-        if path == "/api/state":
-            if not self._token_ok():
-                return self._send(401, {"error": "bad token"})
-            # ?since=<action_seq>：只返回该序号之后的动作，前端高频轮询时减小负载。
-            # 不传则返回全部最近动作（兼容旧调用方）。
-            since = 0
-            m = re.search(r"[?&]since=(\d+)", self.path)
-            if m:
-                since = int(m.group(1))
-            with LOCK:
-                d = dict(LATEST)
-                d["replies"] = list(REPLIES)
-                d["last_danmaku_at"] = LAST_DANMAKU_TIME
-                d["started_at"] = STARTED_AT
-                d["model"] = CURRENT_MODEL
-                d["now_playing"] = NOW_PLAYING
-                d["usage"] = get_usage()
-                d["gift_total"] = sum(GIFT_BOARD.values())
-                d["gift_board"] = sorted(GIFT_BOARD.items(), key=lambda x: -x[1])[:10]
-                d["gift_log"] = list(GIFT_LOG)
-                d["queue"] = {"depth": len(QUEUE), **QUEUE_STATS}
-                d["actions"] = [a for a in ACTION_LOG if a.get("seq", 0) > since]
-                d["action_seq"] = ACTION_SEQ
-                d["director"] = DIRECTOR.snapshot()
-                return self._send(200, d)
-        if self.path.startswith("/audio"):
-            if not self._token_ok():
-                return self._send(401, {"error": "bad token"})
-            p = None
-            if "seq=" in self.path:
-                try:
-                    seq = int(self.path.split("seq=")[1].split("&")[0])
-                    p = REPLY_AUDIO.get(seq)
-                except Exception:
-                    p = None
-            if not p:
-                with LOCK:
-                    p = LATEST_AUDIO
-            if p and os.path.exists(p):
-                with open(p, "rb") as f:
-                    return self._send(200, f.read(), "audio/wav")
-            return self._send(404, {"error": "no audio yet"})
-        if self.path.startswith("/video"):
-            if not self._token_ok():
-                return self._send(401, {"error": "bad token"})
-            with LOCK:
-                p = LATEST.get("local_path", "")
-            if p and os.path.exists(p):
-                with open(p, "rb") as f:
-                    return self._send(200, f.read(), "video/mp4")
-            return self._send(404, {"error": "no video yet"})
-        # 静态资源：礼物播放器、特效库、预渲染视频。
-        # 只允许 static/ 下的真实文件，防止 ../ 路径穿越。
-        if self.path.startswith("/static/"):
-            rel = self.path[len("/static/"):].split("?")[0]
-            full = os.path.realpath(os.path.join(STATIC_DIR, rel))
-            root = os.path.realpath(STATIC_DIR)
-            if not full.startswith(root + os.sep):
-                return self._send(403, {"error": "forbidden"})
-            if os.path.isfile(full):
-                if full.endswith(".js"):
-                    ct = "application/javascript; charset=utf-8"
-                elif full.endswith(".css"):
-                    ct = "text/css; charset=utf-8"
-                elif full.endswith(".json"):
-                    ct = "application/json; charset=utf-8"
-                elif full.endswith(".png"):
-                    ct = "image/png"
-                elif full.endswith(".webm"):
-                    ct = "video/webm"
-                elif full.endswith(".mp4"):
-                    ct = "video/mp4"
-                else:
-                    ct = "application/octet-stream"
-                with open(full, "rb") as f:
-                    return self._send(200, f.read(), ct)
-            return self._send(404, {"error": "not found"})
-        if self.path.startswith("/live2d/"):
-            rel = self.path[len("/live2d/"):].split("?")[0]
-            full = os.path.realpath(os.path.join(LIVE2D_DIR, rel))
-            if not full.startswith(os.path.realpath(LIVE2D_DIR) + os.sep):
-                return self._send(403, {"error": "forbidden"})
-            if os.path.isfile(full):
-                if full.endswith(".png"):
-                    ct = "image/png"
-                elif full.endswith(".js"):
-                    ct = "application/javascript"
-                elif full.endswith(".json"):
-                    ct = "application/json"
-                else:
-                    ct = "application/octet-stream"
-                with open(full, "rb") as f:
-                    return self._send(200, f.read(), ct)
-            return self._send(404, {"error": "not found"})
-        return self._send(404, {"error": "not found"})
-
-    def do_POST(self):
-        if not self._host_ok() or not self._origin_ok():
-            return self._deny()
-        if self.path == "/api/danmaku":
-            # 写入口只允许本机：转发器 cyber-xiaoya-danmaku 永远连
-            # http://127.0.0.1:8000，远程写没有真实需求。
-            # 返回 403 而不是 401 —— 避免转发器把「远程写被禁」误判成令牌过期
-            # 去反复重试；同时明确区分「没权限做这件事」与「令牌不对」。
-            if not self._is_loopback_client():
-                return self._send(403, {"error": "remote write disabled"})
-            try:
-                n = int(self.headers.get("Content-Length", 0) or 0)
-                if n <= 0:
-                    return self._send(400, {"error": "empty body"})
-                if n > MAX_BODY:
-                    return self._send(413, {"error": "payload too large"})
-                body = json.loads(self.rfile.read(n) or b"{}")
-            except Exception:
-                return self._send(400, {"error": "bad json"})
-            if not isinstance(body, dict):
-                return self._send(400, {"error": "json object required"})
-            kind = (body.get("kind") or "").strip()
-            priority = (body.get("priority") or "normal").strip()
-            action = None
-            if kind == "gift":
-                nick = (body.get("nick") or body.get("say_nick") or "").strip()
-                itm = (body.get("gift_item") or "礼物").strip()
-                try:
-                    num = int(body.get("gift_num") or 1)
-                    gift_value = int(body.get("gift_value") or 0)
-                    combo = int(body.get("combo") or num)
-                except (TypeError, ValueError):
-                    return self._send(400, {"error": "gift_num/gift_value/combo must be numbers"})
-                num = max(1, num)
-                gift_value = max(0, gift_value)
-                combo = max(num, combo)
-                # 先走“快速演出”通道：不等 DeepSeek/TTS，礼物一到就能触发动作。
-                # 导演失败不能影响礼物入队/LLM 感谢链路，所以单独兜底。
-                try:
-                    action = publish_action(DIRECTOR.ingest({
-                        "nick": nick or "神秘人",
-                        "gift": itm,
-                        "count": num,
-                        "value": gift_value,
-                        "combo": combo,
-                        "gift_id": str(body.get("gift_id") or ""),
-                        "event_id": str(body.get("event_id") or ""),
-                    }))
-                except Exception:  # noqa: BLE001
-                    traceback.print_exc()
-                item = {
-                    "kind": "gift", "user": nick, "priority": priority,
-                    "gift_item": itm, "gift_num": num,
-                    "gift_value": gift_value,
-                    "event_id": str(body.get("event_id") or ""),
-                    "content": f"观众「{nick or '神秘人'}」送了 {num} 个「{itm}」",
-                }
-            elif (body.get("content") or "").strip():
-                item = {
-                    "kind": "chat", "priority": priority,
-                    "user": (body.get("user") or body.get("nick") or "").strip(),
-                    "content": (body.get("content") or "").strip(),
-                    "event_id": str(body.get("event_id") or ""),
-                }
-            elif (body.get("text") or "").strip():
-                item = {"kind": "speak", "user": "", "priority": priority,
-                        "text": (body.get("text") or "").strip(),
-                        "event_id": str(body.get("event_id") or "")}
-            else:
-                return self._send(400, {"error": "content required"})
-            ok = enqueue(item)
-            response = {"queued": ok, "depth": len(QUEUE),
-                        "status": "queued" if ok else "skipped"}
-            if action:
-                response["action"] = action
-            return self._send(200, response)
-        return self._send(404, {"error": "not found"})
-
-    def log_message(self, *a):
-        pass
+from bridge_http import make_handler
+Handler = make_handler(sys.modules[__name__])
 
 
 def check_auth_config():
-    """启动前的鉴权配置检查（失败关闭）。
-
-    默认配置（127.0.0.1）不受影响。一旦绑到非回环地址，必须提供足够长的
-    只读令牌，否则拒绝启动——避免用户在不知情的情况下把弹幕流与音频暴露给
-    整个局域网。
-
-    即使配了令牌，也要注意：令牌只保护读，写入口已经硬性限定回环。
-    """
-    if BOUND_TO_LOOPBACK:
-        return
-    if ALLOW_UNAUTHENTICATED:
-        print("[安全警告] BRIDGE_HOST=%s 已暴露到局域网，且未设置只读令牌。" % HOST)
-        print("           同网段任何人都能查看弹幕与音频（写入口仍只允许本机）。")
-        return
-    if not BRIDGE_TOKEN:
-        raise SystemExit(
-            "[配置错误] BRIDGE_HOST=%s 会把服务暴露到局域网，但 BRIDGE_TOKEN 为空。\n"
-            "  请二选一：\n"
-            "    1) 设置 BRIDGE_TOKEN=<至少 16 位的随机串>，用 ?token= 打开页面\n"
-            "    2) 设 BRIDGE_ALLOW_UNAUTHENTICATED=1 明确接受只读暴露\n"
-            "  注：写入口 /api/danmaku 无论如何都只允许本机访问，\n"
-            "  所以远程无法替你消耗 API 额度。" % HOST)
-    if len(BRIDGE_TOKEN) < MIN_TOKEN_LEN:
-        raise SystemExit(
-            "[配置错误] BRIDGE_TOKEN 太短（%d 位），暴露到局域网时至少需要 %d 位。"
-            % (len(BRIDGE_TOKEN), MIN_TOKEN_LEN))
-    if not BRIDGE_TOKEN.isascii():
-        # http.server 用 latin-1 解码请求头，而 parse_qs 按 UTF-8 解码 query。
-        # 非 ASCII 令牌在这两条路径上会得到不同的字节序列，导致「URL 里能用、
-        # 请求头里 401」这种诡异现象。强制 ASCII 后两种编码等价，两条路径天然
-        # 一致——不要去分路径 encode，那会留下只在一条路径正确的分支。
-        raise SystemExit(
-            "[配置错误] BRIDGE_TOKEN 只能包含 ASCII 字符（建议用随机串）。\n"
-            "  生成：python -c \"import secrets;print(secrets.token_urlsafe(24))\"")
+    from bridge_auth import check_auth_config as check
+    check(sys.modules[__name__])
 
 
 class BridgeServer(ThreadingHTTPServer):

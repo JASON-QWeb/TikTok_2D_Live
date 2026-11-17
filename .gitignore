@@ -29,3 +29,10 @@ config/stories.json
 
 # ============ macOS ============
 .DS_Store
+
+.venv/
+node_modules/
+/static/3d/
+/static/models/*
+!/static/models/README.md
+.playwright-cli/

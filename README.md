@@ -1,3 +1,25 @@
+# TikTok 3D Live · 本地 3D 数字人直播
+
+此 fork 新增默认 3D 直播页、可生成/导出的简易人形、VRM / GLB 真人模型替换、音频口型、情绪动作和 OBS 透明画面，并优化了流式语音与消息推送。原 Live2D 入口保留在 `/avatar2d`。
+
+```bash
+python3 tools/setup_3d.py
+# 在 .env 填写 DEEPSEEK_API_KEY；也可先用「直接朗读」验证本机语音
+.venv/bin/python bridge.py
+```
+
+Windows 用 `python tools/setup_3d.py` 与 `.venv\Scripts\python.exe bridge.py`。需要 Node.js 22.12+、Python 3.10+。打开 `http://127.0.0.1:8000`。
+
+- [3D 使用、模型替换与 OBS 配置](docs/3D使用说明.md)
+- [验证记录与性能实测](docs/验证记录.md)
+- [3D 模型与表情映射配置](config/avatar3d.json)
+
+内置形象用于先跑通直播；高保真真人外观需要替换成有面部绑定的真人模型。当前支持程序生成人形与加载已有真人资产，不包含照片到真人网格的 AI 建模服务。
+
+---
+
+以下保留上游的 **2D 使用说明**。其中 `setup.sh` / `setup.ps1` 用于下载旧 Live2D 和采集依赖；使用本 fork 的 3D 首页还需执行上面的前端构建。已有 `.env` 请将 `BRIDGE_MIN_INTERVAL` 从 `3` 调到 `0.3` 才能使用新的默认节奏。
+
 # TikTok 2D Live · 抖音 AI 数字人直播
 
 在本地运行的抖音弹幕互动数字人，支持 **macOS（Apple Silicon）与 Windows 10/11**：

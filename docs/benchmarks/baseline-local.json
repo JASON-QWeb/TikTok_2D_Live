@@ -1,0 +1,46 @@
+{
+  "mode": "poll",
+  "samples": [
+    {
+      "seconds": 1.0132,
+      "audio_bytes": 152516,
+      "timings": {
+        "waited": 0.08,
+        "tts": 0.61
+      }
+    },
+    {
+      "seconds": 3.5626,
+      "audio_bytes": 154564,
+      "timings": {
+        "waited": 2.68,
+        "tts": 0.58
+      }
+    },
+    {
+      "seconds": 3.5801,
+      "audio_bytes": 157124,
+      "timings": {
+        "waited": 2.71,
+        "tts": 0.58
+      }
+    },
+    {
+      "seconds": 3.5697,
+      "audio_bytes": 155588,
+      "timings": {
+        "waited": 2.71,
+        "tts": 0.58
+      }
+    },
+    {
+      "seconds": 3.5734,
+      "audio_bytes": 154564,
+      "timings": {
+        "waited": 2.73,
+        "tts": 0.58
+      }
+    }
+  ],
+  "median_seconds": 3.5697
+}

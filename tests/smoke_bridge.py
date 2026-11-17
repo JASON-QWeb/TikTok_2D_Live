@@ -146,8 +146,8 @@ def main():
 
         # ---------- 1. 首页 ----------
         r = SESSION.get(base + "/", timeout=10)
-        check("GET / 返回 Live2D 页面",
-              r.status_code == 200 and "Live2D" in r.text,
+        check("GET / 返回 3D 页面",
+              r.status_code == 200 and "avatar-canvas" in r.text,
               "status=%d len=%d" % (r.status_code, len(r.text)))
 
         # ---------- 2. 状态接口 ----------
@@ -327,7 +327,7 @@ def main():
 
                 r = SESSION.get(base3 + "/?token=" + token, timeout=10)
                 check("页面可用 ?token= 打开",
-                      r.status_code == 200 and "Live2D" in r.text,
+                      r.status_code == 200 and "avatar-canvas" in r.text,
                       "status=%d len=%d" % (r.status_code, len(r.text)))
                 check("页面响应头带 Referrer-Policy",
                       r.headers.get("Referrer-Policy") == "no-referrer",
