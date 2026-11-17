@@ -27,6 +27,7 @@ export function bindSettings(stage, config, effects, notice) {
   }
   function generate() {
     loading++; custom = false;
+    notice('');
     attach(placeholderAvatar(look, config), '简易人形', '程序生成 · GLB 可导出');
     settings.look = look; saveSettings(settings);
   }

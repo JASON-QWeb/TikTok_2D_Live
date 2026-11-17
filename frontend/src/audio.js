@@ -37,8 +37,11 @@ export class SpeechPlayer {
   }
 
   ingest(replies) {
+    // final 与尾部文字会晚于音频发布；更新待播分段，不重新排队或重播。
+    const updates = new Map(replies.map(item => [item.seq, item]));
+    for (const item of this.queue) if (updates.has(item.seq)) Object.assign(item, updates.get(item.seq));
     if (this.current) {
-      const update = replies.find(r => r.seq === this.current.seq);
+      const update = updates.get(this.current.seq);
       if (update) { Object.assign(this.current, update); this.onSpeak(this.current, true); }
     }
     this.queue.push(...this.cursor.take(replies).map(r => ({ ...r })));

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readEvents } from '../../frontend/src/transport.js';
-import { ReplyCursor } from '../../frontend/src/audio.js';
+import { ReplyCursor, SpeechPlayer } from '../../frontend/src/audio.js';
 import { createPlaceholder, disposeObject } from '../../frontend/src/placeholder.js';
 import { Avatar } from '../../frontend/src/avatar.js';
 import { readFileSync } from 'node:fs';
@@ -28,6 +28,17 @@ test('cursor skips refresh history, accepts first live reply and never replays f
   cursor.reset();
   assert.deepEqual(cursor.take([{ seq: 1 }]), []);
   assert.equal(cursor.take([{ seq: 2 }])[0].seq, 2);
+});
+
+test('final metadata updates queued audio without replaying the same segment', () => {
+  const player = new SpeechPlayer(() => { throw new Error('locked player must not fetch'); }, () => {}, () => {});
+  player.ingest([]);
+  player.ingest([{ seq: 1, reply: '第一段', final: false }]);
+  player.ingest([{ seq: 1, reply: '第一段😄', final: true }]);
+  assert.equal(player.queue.length, 1);
+  assert.equal(player.queue[0].final, true);
+  assert.equal(player.queue[0].reply, '第一段😄');
+  player.dispose();
 });
 
 test('generated avatar has working mouth, blink, named rig and bounded head movement', () => {

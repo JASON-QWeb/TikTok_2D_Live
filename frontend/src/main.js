@@ -25,7 +25,7 @@ const speech = new SpeechPlayer(api, (item, speaking) => {
   }
 }, notice);
 
-let session = null;
+let session = null, lastBridgeError = '';
 function onState(state) {
   if (session !== null && state.started_at !== session) {
     speech.reset(); effects.reset(); $('caption').textContent = '';
@@ -44,7 +44,10 @@ function onState(state) {
     const content = `${state.user ? `${state.user}：` : ''}${state.content}`;
     $('last-message').textContent = content; $('danmaku').textContent = content;
   }
-  if (state.error) notice(state.error);
+  if (state.error) notice(lastBridgeError = state.error);
+  else if (lastBridgeError && $('notice').textContent === lastBridgeError) {
+    notice(''); lastBridgeError = '';
+  }
   if (state.tts_backend === 'vidu') notice('3D 实时口型需要本地语音：请将 TTS_BACKEND 改为 auto / piper / say / sapi。');
 }
 
