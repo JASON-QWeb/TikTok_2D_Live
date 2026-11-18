@@ -78,13 +78,16 @@ function bindInterface() {
     } catch (error) { notice(error.message); }
     finally { button.disabled = false; }
   });
-  const obs = new URL(location.href); obs.searchParams.set('obs', '1'); obs.searchParams.set('background', 'transparent');
+  const obs = new URL(location.href);
+  obs.searchParams.set('obs', '1'); obs.searchParams.set('background', 'transparent');
+  obs.searchParams.set('subject', '1');
   $('obs-link').href = obs.href;
   const legacy = new URL('/avatar2d', location.origin);
   if (query.has('token')) legacy.searchParams.set('token', query.get('token'));
   $('legacy-link').href = legacy.href;
   if (query.has('obs')) {
     document.body.classList.add('obs');
+    document.body.classList.toggle('subject-only', query.get('subject') === '1');
     document.documentElement.classList.add('obs');
     const audioButton = $('enable-audio'); audioButton.classList.add('audio-overlay');
     document.body.append(audioButton);
@@ -96,7 +99,7 @@ function bindInterface() {
 async function main() {
   try {
     const config = await (await api('/api/avatar')).json();
-    stage = new Stage($('avatar-canvas'), config, () => speech.level(), fps => { $('fps').textContent = `${fps} FPS`; });
+    stage = new Stage($('avatar-canvas'), config, speech, fps => { $('fps').textContent = `${fps} FPS`; });
     effects = new LiveEffects(stage, notice);
     bindSettings(stage, config, effects, notice);
     bindInterface();

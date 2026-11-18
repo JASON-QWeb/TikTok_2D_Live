@@ -121,6 +121,9 @@ main {
 #stage[data-background="green"] {
   background: #00ff00;
 }
+#stage[data-renderer="portrait"][data-background="studio"] {
+  background: #383936;
+}
 #avatar-canvas {
   display: block;
   width: 100%;
@@ -279,6 +282,13 @@ h2 {
   color: var(--muted);
   line-height: 1.7;
   overflow-wrap: anywhere;
+}
+#model-info:empty {
+  display: none;
+}
+#use-portrait {
+  width: 100%;
+  margin-bottom: 8px;
 }
 .colors {
   display: flex;
@@ -474,5 +484,11 @@ html.obs {
   background: transparent;
 }
 body.obs #message-form {
+  display: none;
+}
+body.subject-only #caption,
+body.subject-only #gift-toast,
+body.subject-only #fx-layer,
+body.subject-only #fx-canvas {
   display: none;
 }

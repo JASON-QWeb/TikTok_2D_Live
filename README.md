@@ -8,13 +8,14 @@ python3 tools/setup_3d.py
 .venv/bin/python bridge.py
 ```
 
-Windows 用 `python tools/setup_3d.py` 与 `.venv\Scripts\python.exe bridge.py`。需要 Node.js 22.12+、Python 3.10+。打开 `http://127.0.0.1:8000`。
+Windows 用 `python tools/setup_3d.py` 与 `.venv\Scripts\python.exe bridge.py`。需要 Node.js 22.12+、Python 3.10+。打开 `http://127.0.0.1:8000`，默认显示短发写实主播。用「直接朗读」可以测试现场口型，点击「OBS 人物主体」打开透明合成画面。
 
 - [3D 使用、模型替换与 OBS 配置](docs/3D使用说明.md)
+- [写实人物、透明输出与素材制作](docs/写实人物.md)
 - [验证记录与性能实测](docs/验证记录.md)
 - [3D 模型与表情映射配置](config/avatar3d.json)
 
-内置形象用于先跑通直播；高保真真人外观需要替换成有面部绑定的真人模型。当前支持程序生成人形与加载已有真人资产，不包含照片到真人网格的 AI 建模服务。
+默认写实人物采用原创照片纹理、带深度的正面网格和本地语音驱动。全身及大角度镜头可导入带表情绑定的 VRM 或 GLB。
 
 ---
 

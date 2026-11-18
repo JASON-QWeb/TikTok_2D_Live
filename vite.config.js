@@ -5,7 +5,7 @@ export default defineConfig({
   base: '/static/3d/',
   build: { outDir: '../static/3d', emptyOutDir: true },
   server: {
-    proxy: Object.fromEntries(['/api', '/audio', '/video', '/static/models',
+    proxy: Object.fromEntries(['/api', '/audio', '/video', '/static/models', '/static/portraits',
       '/static/gift', '/static/vendor'].map(path => [path, 'http://127.0.0.1:8000'])),
   },
 });

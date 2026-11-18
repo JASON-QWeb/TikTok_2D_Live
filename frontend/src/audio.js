@@ -1,3 +1,5 @@
+import { mouthShape } from './portrait/articulation.js';
+
 export class ReplyCursor {
   constructor() { this.reset(); }
   reset() { this.initialized = false; this.last = 0; }
@@ -26,9 +28,11 @@ export class SpeechPlayer {
     if (!this.context) {
       this.context = new AudioContext();
       this.analyser = this.context.createAnalyser();
-      this.analyser.fftSize = 512;
+      this.analyser.fftSize = 1024;
+      this.analyser.smoothingTimeConstant = 0.28;
       this.analyser.connect(this.context.destination);
       this.samples = new Float32Array(this.analyser.fftSize);
+      this.spectrum = new Float32Array(this.analyser.frequencyBinCount);
     }
     await this.context.resume();
     this.unlocked = this.context.state === 'running';
@@ -110,6 +114,12 @@ export class SpeechPlayer {
     let sum = 0;
     for (const value of this.samples) sum += value * value;
     return Math.min(1, Math.sqrt(sum / this.samples.length) * 5);
+  }
+
+  articulation(level) {
+    if (!this.source || level < 0.065) return undefined;
+    this.analyser.getFloatFrequencyData(this.spectrum);
+    return mouthShape(level, this.spectrum, this.context.sampleRate / this.analyser.fftSize);
   }
 
   reset() {

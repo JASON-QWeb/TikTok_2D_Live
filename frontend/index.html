@@ -12,17 +12,17 @@
   <header class="topbar">
     <a class="brand" href="/">数字人<span>3D LIVE</span></a>
     <span id="connection" role="status">连接中</span>
-    <a id="obs-link" class="button secondary" target="_blank" rel="noopener">OBS 纯净画面 ↗</a>
+    <a id="obs-link" class="button secondary" target="_blank" rel="noopener">OBS 人物主体 ↗</a>
   </header>
   <main>
     <section class="preview" aria-label="3D 数字人预览">
       <div id="stage" data-background="studio">
-        <canvas id="avatar-canvas" aria-label="3D 形象，可拖动旋转、滚轮缩放"></canvas>
+        <canvas id="avatar-canvas" aria-label="数字人，可拖动调整视角、滚轮缩放"></canvas>
         <div id="fx-layer"></div><canvas id="fx-canvas"></canvas><div id="gift-toast"></div>
-        <div class="stage-top"><span id="avatar-name">简易人形</span><span id="state-label">等待弹幕</span></div>
+        <div class="stage-top"><span id="avatar-name"></span><span id="state-label">等待弹幕</span></div>
         <div id="danmaku" aria-live="polite"></div>
         <div id="caption" aria-live="polite"></div>
-        <div class="stage-bottom"><span id="model-type">正在加载 3D 形象</span><span id="fps">— FPS</span></div>
+        <div class="stage-bottom"><span id="model-type">正在加载形象</span><span id="fps">— FPS</span></div>
       </div>
       <div class="metrics" aria-label="实时性能">
         <div><span>首段音频</span><strong id="first-audio">—</strong></div>
@@ -44,21 +44,23 @@
         <h1>直播控制</h1>
         <button id="enable-audio" class="primary">开启声音</button>
         <div class="field"><label for="background">背景</label><select id="background"><option value="studio">摄影棚</option><option value="transparent">透明</option><option value="green">绿幕</option></select></div>
-        <div class="field"><label for="camera">镜头</label><select id="camera"><option value="portrait">半身</option><option value="full">全身</option></select></div>
+        <div class="field"><label for="camera">镜头</label><select id="camera"><option value="portrait">半身</option><option value="close" hidden>近景</option><option value="full">全身</option></select></div>
         <div class="field"><label for="quality">画质</label><select id="quality"><option value="balanced">均衡 · 60 FPS</option><option value="low">节能 · 30 FPS</option><option value="high">高清 · 60 FPS</option></select></div>
       </section>
       <section class="control-section">
         <h2>形象</h2>
+        <button id="use-portrait" class="secondary">使用写实人物</button>
         <label for="model-file" class="button file-button">导入 VRM / GLB <span>＋</span></label>
         <input type="file" id="model-file" accept=".vrm,.glb" class="sr-only">
-        <p id="model-info">内置简易人形，可随时替换</p>
-        <div class="colors">
-          <label>肤色<input id="skin" type="color" value="#c98e6f"></label>
-          <label>发色<input id="hair" type="color" value="#30231f"></label>
-          <label>服装<input id="outfit" type="color" value="#334b49"></label>
-        </div>
-        <div class="button-row"><button id="generate" class="secondary">生成简易形象</button><button id="export" class="secondary">导出 GLB ↓</button></div>
-        <details><summary>替换真人模型</summary><p>导入用于本次预览。长期使用请将模型放入 static/models/，在 config/avatar3d.json 中设置 url；OBS 会自动加载同一模型。</p><p>嘴型需 jawOpen 等形态键，或 VRM 表情。照片到真人网格需先在建模工具中完成。</p></details>
+        <p id="model-info" role="status"></p>
+        <details><summary>简易形象工具</summary>
+          <div class="colors">
+            <label>肤色<input id="skin" type="color" value="#c98e6f"></label>
+            <label>发色<input id="hair" type="color" value="#30231f"></label>
+            <label>服装<input id="outfit" type="color" value="#334b49"></label>
+          </div>
+          <div class="button-row"><button id="generate" class="secondary">生成简易形象</button><button id="export" class="secondary">导出 GLB ↓</button></div>
+        </details>
       </section>
       <section class="control-section activity">
         <h2>最近互动</h2>

@@ -1,6 +1,10 @@
 {
   "name": "数字人",
   "url": "",
+  "portrait": {
+    "name": "写实主播",
+    "manifest": "/static/portraits/daylight/rig.json"
+  },
   "rotationY": 0,
   "maxPixelRatio": 1.5,
   "maxFps": 60,
